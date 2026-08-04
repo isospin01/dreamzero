@@ -1,0 +1,14 @@
+# @package _global_
+# OmniRobot bridge: RoboCasa365 LeRobot-v3 through OmniRobot's loader.
+# Launch: torchrun ... experiment.py data=dreamzero/omni_robocasa_v3 \
+#     omni_src=/app/code/src omni_dataset_root=... omni_stats_path=...
+omni_src: /app/code/src
+omni_dataset_root: ???
+omni_stats_path: /app/code/assets/stats/robocasa_panda_omron/stats.json
+
+train_dataset:
+  _target_: groot.vla.data.dataset.omni_robocasa.OmniRobocasaDataset
+  _convert_: object
+  omnirobot_src: ${omni_src}
+  dataset_root: ${omni_dataset_root}
+  stats_path: ${omni_stats_path}
