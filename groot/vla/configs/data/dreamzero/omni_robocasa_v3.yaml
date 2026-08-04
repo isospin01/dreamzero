@@ -1,8 +1,24 @@
 # @package _global_
 # OmniRobot bridge: RoboCasa365 LeRobot-v3 through OmniRobot's loader.
-# Launch: torchrun ... experiment.py data=dreamzero/omni_robocasa_v3 \
-#     omni_src=/app/code/src omni_dataset_root=... omni_stats_path=...
-omni_src: /app/code/src
+# Inherits the DROID base config (transforms, interpolation globals) and swaps
+# only the dataset. Requires `lerobot` + `torchcodec` installed in this venv.
+# Launch (mirror scripts/train/droid_training_lora.sh for the full override set):
+#   torchrun ... experiment.py data=dreamzero/omni_robocasa_v3 \
+#     omni_dataset_root=<local robocasa365 snapshot> \
+#     max_steps=... output_dir=... wandb_project=...
+defaults:
+  - dreamzero/base_48_wan_fine_aug_relative
+  - _self_
+
+# Block geometry for the adapter's fixed window: T=9 video frames (K=1 chunk),
+# 24 actions, 1 state anchor — matches the DROID recipe's CLI overrides.
+action_horizon: 24
+num_frames: 9
+num_frame_per_block: 2
+num_action_per_block: 24
+per_device_train_batch_size: 1
+
+omni_src: /app/code/.scratch/fastwan-wt/src
 omni_dataset_root: ???
 omni_stats_path: /app/code/assets/stats/robocasa_panda_omron/stats.json
 

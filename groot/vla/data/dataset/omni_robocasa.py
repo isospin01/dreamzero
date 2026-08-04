@@ -30,13 +30,16 @@ _MAX_STATE_DIM = 64
 _EMBODIMENT_ID = 17  # oxe_droid slot
 
 
-def _tile_2x2(frames: np.ndarray) -> np.ndarray:
-    """(T, V=3, H, W, C) uint8 -> (T, 2H, 2W, C): [v0|v2] / [v1|black]."""
+def _tile_droid(frames: np.ndarray) -> np.ndarray:
+    """(T, V=3, H, W, C) uint8 -> (T, 2H, 2W, C) in the OXE_DROID layout the id-17
+    checkpoint and collate() preamble expect: wrist across the full top row
+    (width-doubled), exteriors bottom-left / bottom-right.
+    Mapping: eye_in_hand -> wrist, agentview_left/right -> exteriors."""
     t, v, h, w, c = frames.shape
     grid = np.zeros((t, 2 * h, 2 * w, c), dtype=np.uint8)
-    grid[:, :h, :w] = frames[:, 0]
-    grid[:, :h, w:] = frames[:, 2 if v > 2 else v - 1]
-    grid[:, h:, :w] = frames[:, 1 if v > 1 else 0]
+    grid[:, :h, :] = np.repeat(frames[:, 2], 2, axis=-2)  # wrist, width-doubled
+    grid[:, h:, :w] = frames[:, 0]  # left exterior
+    grid[:, h:, w:] = frames[:, 1]  # right exterior
     return grid
 
 
@@ -66,14 +69,26 @@ class OmniRobocasaDataset(torch.utils.data.Dataset):
         from groot.vla.data.schema.lerobot import DatasetMetadata
 
         s = self.source.raw_stats
+        stat = lambda d: {k: v for k, v in d.items() if k != "count"}
         meta = {
             "statistics": {
-                "state": {"state": s["state.state"]},
-                "action": {"action": s["action.action"]},
+                "state": {"state": stat(s["state.state"])},
+                "action": {"action": stat(s["action.action"])},
             },
             "modalities": {
-                "video": {}, "state": {"state": {"shape": [self.source.state_dim]}},
-                "action": {"action": {"shape": [self.source.action_dim]}},
+                "video": {},
+                "state": {
+                    "state": {
+                        "shape": [self.source.state_dim],
+                        "absolute": True, "continuous": True,
+                    }
+                },
+                "action": {
+                    "action": {
+                        "shape": [self.source.action_dim],
+                        "absolute": True, "continuous": True,
+                    }
+                },
             },
             "embodiment_tag": "oxe_droid",
         }
@@ -101,12 +116,15 @@ class OmniRobocasaDataset(torch.utils.data.Dataset):
                 for i in range(t)
             ]
         )
-        images = _tile_2x2(resized)  # (T, 2h, 2w, C) uint8
+        images = _tile_droid(resized)  # (T, 2h, 2w, C) uint8
 
         action = np.zeros((_NUM_ACTION, _MAX_ACTION_DIM), dtype=np.float32)
         action_mask = np.zeros_like(action, dtype=bool)
-        action[:, : self.source.action_dim] = s["action"]
-        action_mask[:, : self.source.action_dim] = True
+        # DreamZero's action head asserts actions in [-1,1]; clip AFTER the exact
+        # shared normalization (their native q99 pipeline is bounded the same way).
+        action[:, : self.source.action_dim] = np.clip(s["action"], -1.0, 1.0)
+        # Mask real dims AND mask out lerobot's repeated-last-step padding.
+        action_mask[:, : self.source.action_dim] = ~s["action_is_pad"][:, None]
 
         state = np.zeros((1, _MAX_STATE_DIM), dtype=np.float32)
         state_mask = np.zeros_like(state, dtype=bool)
@@ -117,9 +135,11 @@ class OmniRobocasaDataset(torch.utils.data.Dataset):
             "images": images,
             "text": s["prompt"],
             "text_negative": (
-                "色调艳丽,过曝,静态,细节模糊不清,字幕,风格,作品,画作,画面,静止,整体发灰,最差质量,"
-                "低质量,JPEG压缩残留,丑陋的,残缺的,多余的手指,画得不好的手部,画得不好的脸部,畸形的,"
-                "毁容的,形态畸形的肢体,手指融合,静止不动的画面,杂乱的背景,三条腿,背景人很多,倒着走"
+                "Vibrant colors, overexposed, static, blurry details, text, subtitles, style, "
+                "artwork, painting, image, still, grayscale, dull, worst quality, low quality, "
+                "JPEG artifacts, ugly, mutilated, extra fingers, bad hands, bad face, deformed, "
+                "disfigured, mutated limbs, fused fingers, stagnant image, cluttered background, "
+                "three legs, many people in the background, walking backwards."
             ),
             "state": state,
             "state_mask": state_mask,
