@@ -1,32 +1,110 @@
 # @package _global_
-# OmniRobot bridge: RoboCasa365 LeRobot-v3 through OmniRobot's loader.
-# Inherits the DROID base config (transforms, interpolation globals) and swaps
-# only the dataset. Requires `lerobot` + `torchcodec` installed in this venv.
+# RoboCasa365 (LeRobot v3) through OmniRobot's PRODUCTION v3 data path.
+#
+# The dataset is declared the way OmniRobot's own configs/train/*.py declare a
+# DatasetEntry: a dataset path + an embodiment name. Everything else (columns,
+# source adapter, camera roles, target fps) comes from the embodiment topology,
+# and the q01/q99 statistics resolve through OmniRobot's stats store
+# (assets/stats/robocasa_panda_omron/stats.json) — there is NO stats_path here on
+# purpose, so this run cannot drift from the pi05 runs.
+#
+# Inherits the DROID base config (transforms/interpolation globals) and swaps only
+# the dataset. Needs OmniRobot's `unified` package importable (see omni_src) plus
+# torchcodec + huggingface_hub + pyarrow + fsspec in this venv; the v3 loader does
+# NOT need the `lerobot` package itself.
+#
 # Launch (mirror scripts/train/droid_training_lora.sh for the full override set):
-#   torchrun ... experiment.py data=dreamzero/omni_robocasa_v3 \
-#     omni_dataset_root=<local robocasa365 snapshot> \
+#   torchrun ... groot/vla/experiment/experiment.py data=dreamzero/omni_robocasa_v3 \
+#     omni_src=/app/code/.scratch/fastwan-wt/src \
 #     max_steps=... output_dir=... wandb_project=...
+#
+# Resume note: the underlying stream is infinite and the sampler is decorative, so
+# resume with `training_args.ignore_data_skip=true` and bump `omni_epoch_offset`
+# (see the module docstring in groot/vla/data/dataset/omni_robocasa.py).
 defaults:
   - dreamzero/base_48_wan_fine_aug_relative
   - _self_
 
-# Block geometry for the adapter's fixed window: T=9 video frames (K=1 chunk),
-# 24 actions, 1 state anchor — matches the DROID recipe's CLI overrides.
+# Block geometry for the adapter's fixed window: T=9 video frames (K=1 chunk, the
+# Wan VAE's 4x temporal stride gives 3 latent frames => 2 blocks), 24 actions,
+# 1 state anchor — matches the DROID recipe's CLI overrides. The dataset re-checks
+# these against the action head's asserts at construction time.
 action_horizon: 24
 num_frames: 9
 num_frame_per_block: 2
 num_action_per_block: 24
+num_state_per_block: 1
 max_chunk_size: 5      # interpolated by action_head/wan_flow_matching_action_tf.yaml
 max_state_dim: 64
 per_device_train_batch_size: 1
 
+# Per-view resize before the 2x2 DROID tile, so the tiled frame is 352x640.
+# That is what frame_seqlen encodes: (352/8/2) * (640/8/2) = 22 * 40 = 880 latent
+# tokens per frame (VAE 8x spatial + 2x2 DiT patch). Change one, change both.
+image_resolution_height: 176
+image_resolution_width: 320
+frame_seqlen: 880
+# 3 source cameras. Inert on this path (collate() only branches on num_views for
+# AGIBOT), kept aligned with the DROID recipe.
+num_views: 3
+
+# set_epoch() must reach the worker processes for epoch_offset to advance the
+# stream; persistent workers keep the epoch-0 copy alive forever.
+dataloader_persistent_workers: false
+# A shard is decoded whole into RAM PER WORKER (plus one prefetching), so keep
+# this at the DROID recipe's value rather than the conf.yaml default.
+dataloader_num_workers: 1
+
+# --- OmniRobot bridge knobs -------------------------------------------------- #
+# Path to OmniRobot's `src` (prepended to sys.path). Set to null if `unified` is
+# already importable in this venv.
 omni_src: /app/code/.scratch/fastwan-wt/src
-omni_dataset_root: ???
-omni_stats_path: /app/code/assets/stats/robocasa_panda_omron/stats.json
+omni_dataset_path: hf://datasets/ember-lab-berkeley/robocasa365-pretrain-atomic
+omni_embodiment: robocasa_panda_omron
+# Target TIMESTEPS per shard (episodes are packed up to this). A shard is decoded
+# whole into RAM, per DataLoader WORKER, at roughly
+# shard_size x n_cameras x H*W*3 bytes x 2 (the next shard prefetches while the
+# current one drains), so keep dataloader_num_workers small (the DROID script uses 1).
+omni_shard_size: 2000
+omni_shard_sampling_rate: 1.0
+# Nominal epoch length; the stream is infinite and `max_steps` governs the run.
+omni_steps_per_epoch: 1000000
+# Mixture epoch to start from (resume: set to the number of epochs already consumed).
+omni_epoch_offset: 0
+# Skip windows whose video runs past the end of the episode (LeRobot repeats the
+# last frame there, and DreamZero's sample contract has no video-pad slot).
+omni_drop_padded_video_windows: true
 
 train_dataset:
   _target_: groot.vla.data.dataset.omni_robocasa.OmniRobocasaDataset
   _convert_: object
+  dataset_path: ${omni_dataset_path}
+  embodiment: ${omni_embodiment}
   omnirobot_src: ${omni_src}
-  dataset_root: ${omni_dataset_root}
-  stats_path: ${omni_stats_path}
+  action_horizon: ${action_horizon}
+  num_video_frames: ${num_frames}
+  # block style: "${...}" is not a legal plain scalar inside a YAML flow sequence
+  image_hw:
+    - ${image_resolution_height}
+    - ${image_resolution_width}
+  max_action_dim: ${max_action_dim}
+  max_state_dim: ${max_state_dim}
+  embodiment_id: ${embodiment_tag_to_projector_index.oxe_droid}
+  metadata_embodiment_tag: oxe_droid
+  # OmniRobot ViewRole names, in the DROID tile order
+  # (bottom-left exterior, bottom-right exterior, top wrist).
+  view_order: [external_0, external_1, left_wrist]
+  # MUST match per_device_train_batch_size: it is the mixture's per-shard
+  # drop-tail group size (every group of this many samples comes from one shard).
+  batch_size: ${per_device_train_batch_size}
+  shard_size: ${omni_shard_size}
+  shard_sampling_rate: ${omni_shard_sampling_rate}
+  seed: ${seed}
+  video_backend: torchcodec
+  drop_padded_video_windows: ${omni_drop_padded_video_windows}
+  steps_per_epoch: ${omni_steps_per_epoch}
+  epoch_offset: ${omni_epoch_offset}
+  # Checked against the action head's block asserts at construction time.
+  num_frame_per_block: ${num_frame_per_block}
+  num_action_per_block: ${num_action_per_block}
+  num_state_per_block: ${num_state_per_block}
