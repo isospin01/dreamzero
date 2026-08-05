@@ -16,6 +16,8 @@ action_horizon: 24
 num_frames: 9
 num_frame_per_block: 2
 num_action_per_block: 24
+max_chunk_size: 5      # interpolated by action_head/wan_flow_matching_action_tf.yaml
+max_state_dim: 64
 per_device_train_batch_size: 1
 
 omni_src: /app/code/.scratch/fastwan-wt/src
