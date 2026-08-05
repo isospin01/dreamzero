@@ -116,6 +116,12 @@ class OmniRobocasaDataset(torch.utils.data.Dataset):
                 for i in range(t)
             ]
         )
+        # KNOWN LIMITATION: DreamTransform's output contract has no video-pad slot, so
+        # s["video_is_pad"] cannot be forwarded. Windows near an episode end (~12% of
+        # indices at the mean 203-frame episode length) therefore feed LeRobot's
+        # repeated-last-frame padding to the dynamics loss as if it were real future
+        # video. Fix properly by filtering sampled indices to fully-interior windows in
+        # RobocasaWindowSource before this is used for a real run.
         images = _tile_droid(resized)  # (T, 2h, 2w, C) uint8
 
         action = np.zeros((_NUM_ACTION, _MAX_ACTION_DIM), dtype=np.float32)
