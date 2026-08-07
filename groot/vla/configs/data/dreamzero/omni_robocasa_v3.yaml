@@ -19,7 +19,9 @@
 #     max_steps=... output_dir=... wandb_project=...
 #
 # Resume note: the underlying stream is infinite and the sampler is decorative, so
-# resume with `training_args.ignore_data_skip=true` and bump `omni_epoch_offset`
+# resume with `+training_args.ignore_data_skip=true` (the `+` is required — the
+# training_args node does not declare the key, so a bare override fails under
+# hydra's struct mode) and bump `omni_epoch_offset`
 # (see the module docstring in groot/vla/data/dataset/omni_robocasa.py).
 defaults:
   - dreamzero/base_48_wan_fine_aug_relative
@@ -59,7 +61,13 @@ dataloader_num_workers: 1
 # Path to OmniRobot's `src` (prepended to sys.path). Set to null if `unified` is
 # already importable in this venv.
 omni_src: /app/code/.scratch/fastwan-wt/src
-omni_dataset_path: hf://datasets/ember-lab-berkeley/robocasa365-pretrain-atomic
+# Same env knob as the pi05 config and the FastWAM bridge, so all three runs point
+# at the same data by construction. A local v3 snapshot works too, BUT its basename
+# must be `robocasa_panda_omron` (or set OMNI_STATS_STORE): OmniRobot's stats store
+# keys on the last path segment, and any other name silently bypasses
+# assets/stats/robocasa_panda_omron/stats.json — breaking normalization parity.
+# Check the stats fingerprint the dataset logs at construction.
+omni_dataset_path: ${oc.env:OMNI_ROBOCASA_ATOMIC_DIR,'hf://datasets/ember-lab-berkeley/robocasa365-pretrain-atomic'}
 omni_embodiment: robocasa_panda_omron
 # Target TIMESTEPS per shard (episodes are packed up to this). A shard is decoded
 # whole into RAM, per DataLoader WORKER, at roughly

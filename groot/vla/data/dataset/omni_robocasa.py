@@ -95,8 +95,11 @@ So this is an honest iterable-to-map wrapper:
 * Resume: ``set_epoch(e)`` (reached via ``BaseSampler.set_epoch`` ->
   ``data_source.set_epoch``) advances the mixture's ``epoch_offset`` and restarts
   the stream, so a new epoch never replays the previous one. For a mid-run resume
-  set ``epoch_offset`` explicitly and run with ``ignore_data_skip=true``; the HF
-  batch-skipping path would otherwise decode and discard thousands of windows.
+  set ``epoch_offset`` explicitly and run with ``+training_args.ignore_data_skip=true``
+  (the ``+`` because conf.yaml's training_args doesn't declare the key). The HF
+  batch-skipping path skips SAMPLER INDICES, which ``__getitem__`` ignores — it
+  would neither advance the stream nor cost decode time; ``epoch_offset`` is the
+  mechanism that actually moves the data forward.
 
 Video padding (the previous file's KNOWN LIMITATION — now fixed)
 ----------------------------------------------------------------
@@ -118,6 +121,8 @@ at stride 3 (1.2 s @ 20 fps), action (24, 12 -> pad 32), state (1, 16 -> pad 64)
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sys
 from typing import Any, Iterator, Sequence
@@ -474,6 +479,16 @@ class OmniRobocasaDataset(torch.utils.data.Dataset):
 
         self.num_frames_available = single.num_frames
         self.merged_metadata = self._build_metadata(self.mixture.global_stats)
+        # q01/q99 fingerprint: must match across the pi05/DreamZero/FastWAM runs,
+        # or they normalized with different statistics (see OmniRobot's stats_store
+        # path-keying — a local dataset root with the wrong basename bypasses the
+        # repo stats store silently).
+        emb_stats = self.mixture.global_stats[self.embodiment_value]
+        fp = hashlib.sha256(json.dumps(
+            {m: {k: {f: np.asarray(v[f]).tolist() for f in ("q01", "q99")}
+                 for k, v in emb_stats[m].items()} for m in ("state", "action")},
+            sort_keys=True).encode()).hexdigest()[:12]
+        logger.info("OmniRobocasaDataset: normalization stats fingerprint %s", fp)
         logger.info(
             "OmniRobocasaDataset: %s [%s] %d usable frames over %d shards; "
             "video deltas %s, action horizon %d, nominal epoch %d",
